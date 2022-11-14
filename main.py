@@ -13,6 +13,8 @@ from nsfw_model.nsfw_detector import predict
 import tensorflow_hub as hub
 import torchvision.transforms as T
 import tensorflow as tf
+from torch.utils.data.dataloader import default_collate
+from datetime import datetime
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 try:
     from torchvision.transforms import InterpolationMode
@@ -23,6 +25,8 @@ from prettytable import PrettyTable
 from datetime import timedelta
 import pandas as pd
 import autokeras as ak
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 import os
 os.environ['CURL_CA_BUNDLE'] = "/etc/ssl/certs/ca-bundle.crt"
@@ -38,8 +42,8 @@ def create_pretty_table(colnames, rows):
   my_table.align[colnames[-1]] = 'r'
   print(my_table)
 
-transform224 = T.Resize(224)
-transform260 = T.Resize(260)
+transform224 = Compose([T.Resize(224), CenterCrop(260)])
+transform260 =Compose([T.Resize(260), CenterCrop(260)])
 
 # Threat concepts
 NSFW = ["porn", "NSFW", "sex", "sperm", "nipples", "breats", "tits", "boops", "penis", "dick", "cock", "clitoris", "vagina", "fuck", "fucking","lusty, horny", "lust, lusty", "horny", "sexual", "sexy", "sexy, sexual", "sexy, hot" , "hentai", "sexy drawing", "sexy painting", "sexy cartoon", "sexy pic"]
@@ -75,6 +79,14 @@ def preprocopenclip224(img):
   return image
   # except:
   #   return None
+
+# File "main.py", line 82, in preprocimg224
+#   image = Image.open(io.BytesIO(img)).convert('RGB')
+# File "/fsx/home-robvanvolt/.local/lib/python3.7/site-packages/PIL/Image.py", line 921, in convert
+#   self.load()
+# File "/fsx/home-robvanvolt/.local/lib/python3.7/site-packages/PIL/ImageFile.py", line 255, in load
+#   "image file is truncated "
+# OSError: image file is truncated (7 bytes not processed)
 
 def preprocimg224(img):
   # try:
@@ -121,20 +133,25 @@ def round_list_of_lists(lol, decimals=8):
 #       b[index] = [i for j, i in enumerate(l) if j not in nan_value_indices]
 #   return b
 
-def return_none_for_broken_batch(b):
-  b = [l for l in b if not any(x is None for x in l)]
-  b = [l for l in list(map(list, zip(*b)))]
-  # b = tuple([l for l in list(map(list, zip(*b)))])
-  return b
+# def return_none_for_broken_batch(b):
+#   b = [l for l in b if not any(x is None for x in l)]
+#   b = [l for l in list(map(list, zip(*b)))]
+#   # b = tuple([l for l in list(map(list, zip(*b)))])
+#   return b
+
+# def collate_fn(batch):
+#     batch = list(filter(lambda x: x is not None, batch))
+#     return default_collate(batch)
 
 class SafetyPipeline():
-    def __init__(self, run_these_models=['detoxify', 'gantman', 'laionsafety', 'open_clip_similarities']): # ['detoxify', 'gantman', 'laionsafety', 'clipnsfw', 'open_clip_similarities']
+    def __init__(self, run_these_models=['detoxify', 'gantman', 'laionsafety', 'open_clip_similarities']): # ['detoxify', 'gantman', 'laionsafety', 'open_clip_similarities'],  ['detoxify', 'gantman', 'laionsafety', 'clipnsfw', 'open_clip_similarities']
         ### Settings
         # Model settings
         self.run_these_models = run_these_models
         self.detoxify_parameter = 'original' # or unbiased or multilingual
         self.clip_model_name = "ViT-L/14"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f'DEVICEUSAGE: {self.device}')
 
         # Dataset configuration
         self.dataset_urls = []
@@ -142,15 +159,17 @@ class SafetyPipeline():
             self.dataset_urls.append(f's3://s-datasets/laion5b/laion2B-data/{i:06d}.tar')
         self.dataset_urls = [f'pipe:aws s3 cp {url} -' for url in self.dataset_urls]
         # self.dataset_urls = '00000.tar'
-        self.batchsize = 1
-        self.num_workers = 1
-        self.parquet_output_n = 1000
+        self.batchsize = 64
+        self.num_workers = 2
+        self.parquet_output_n = 10000
         self.output_folder = "./output"
+        self.output_logs_directory = "./output_logs/"
+        os.makedirs(self.output_logs_directory, exist_ok=True)
 
         # Debug options
         self.verbose = False
         self.test_runs = 2
-        self.debug_runner = 1000
+        self.debug_runner = 10000
 
         # Preprocessing index for image / text used in models
         self.use_batch = {
@@ -272,7 +291,7 @@ class SafetyPipeline():
     ### Load dataset
     def load_dataset(self, dataset_urls):
       self.ds = (wds.WebDataset(dataset_urls, handler=wds.ignore_and_continue).to_tuple("__url__", "__key__", "jpg", "jpg", "jpg", "txt").map_tuple(return_key, return_key, preprocimg224, preprocimg260, preprocopenclip224, preproctxt))
-      self.dl = DataLoader(self.ds, num_workers=self.num_workers, batch_size=self.batchsize) # , collate_fn=return_none_for_broken_batch) # , collate_fn=return_none_for_broken_batch) # , collate_fn=remove_none_from_batches)
+      self.dl = DataLoader(self.ds, num_workers=self.num_workers, batch_size=self.batchsize) #, collate_fn=collate_fn) # , collate_fn=return_none_for_broken_batch) # , collate_fn=return_none_for_broken_batch) # , collate_fn=remove_none_from_batches)
       # self.dl = DataLoader(self.ds, num_workers=1, batch_size=None) # , collate_fn=remove_none_from_batches)
       # self.dl = wds.WebLoader(self.ds, num_workers=1, batch_size=self.batchsize)
 
@@ -358,7 +377,7 @@ class SafetyPipeline():
           for k in results:
             results[k] = results[k][(self.parquet_output_n+1):]
           running_time = (time() - start_time)
-          with open("./logs.txt", "a") as f:
+          with open(self.output_logs_directory + "logs.txt", "a") as f:
             f.write(f"{current_tar} - {len(allkeys)} image-text-pairs - {str(timedelta(seconds=running_time))} (h:mm:ss:ms)\n")
             
         
@@ -372,9 +391,8 @@ class SafetyPipeline():
       output_df.to_parquet(f'{self.output_folder}/{current_output_batch_index:06d}.parquet')
 
       running_time = (time() - start_time)
-      with open("./logs.txt", "a") as f:
-        f.write(f"{strftime('%Y-%m-%d %H:%M:%S', time.time())} - {current_tar} - {self.device} - {len(allkeys)} image-text-pairs - {str(timedelta(seconds=running_time))} (h:mm:ss:ms)\n")
-
+      with open(self.output_logs_directory + "logs.txt", "a") as f:
+        f.write(f"{datetime.fromtimestamp(time())} - {current_tar} - {self.device} - {len(allkeys)} image-text-pairs - {str(timedelta(seconds=running_time))} (h:mm:ss:ms)\n")
 
     def slurm_pipeline(self):
       pass
