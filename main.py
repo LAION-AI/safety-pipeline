@@ -88,13 +88,13 @@ def preprocopenclip224(img):
 #   "image file is truncated "
 # OSError: image file is truncated (7 bytes not processed)
 
-def preprocimg224(img):
-  # try:
-  image = Image.open(io.BytesIO(img)).convert('RGB')
-  image = np.array(transform224(image)) # , dtype=object).astype('float32')
-  return image
-  # except:
-  #   return None
+# def preprocimg224(img):
+#   # try:
+#   image = Image.open(io.BytesIO(img)).convert('RGB')
+#   image = np.array(transform224(image)) # , dtype=object).astype('float32')
+#   return image
+#   # except:
+#   #   return None
 
 def preprocimg260(img):
   # try:
@@ -159,9 +159,10 @@ class SafetyPipeline():
             self.dataset_urls.append(f's3://s-datasets/laion5b/laion2B-data/{i:06d}.tar')
         self.dataset_urls = [f'pipe:aws s3 cp {url} -' for url in self.dataset_urls]
         # self.dataset_urls = '00000.tar'
-        self.batchsize = 64
+        self.batchsize = 512
         self.num_workers = 2
-        self.parquet_output_n = 10000
+        self.prefetch_factor = 2
+        self.parquet_output_n = 5000
         self.output_folder = "./output"
         self.output_logs_directory = "./output_logs/"
         os.makedirs(self.output_logs_directory, exist_ok=True)
@@ -172,16 +173,30 @@ class SafetyPipeline():
         self.debug_runner = 10000
 
         # Preprocessing index for image / text used in models
+        # return_key, return_key, preprocimg224, preprocimg260, preprocopenclip224, preproctxt
+        # self.use_batch = {
+        #     ## general parameters
+        #     'url': 0,
+        #     'key': 1,
+        #     ## models
+        #     'gantman': 2,
+        #     'laionsafety': 3,
+        #     'clipnsfw': 3,
+        #     'open_clip_similarities': 4,
+        #     'detoxify': 5
+        # }
+
+        # return_key, return_key, preprocimg260, preprocopenclip224, preproctxt
         self.use_batch = {
             ## general parameters
             'url': 0,
             'key': 1,
             ## models
-            'gantman': 2,
-            'laionsafety': 3,
-            'clipnsfw': 3,
-            'open_clip_similarities': 4,
-            'detoxify': 5
+            'laionsafety': 2,
+            'clipnsfw': 2,
+            'gantman': 3,
+            'open_clip_similarities': 3,
+            'detoxify': 4
         }
 
         # Load models into memory
@@ -263,7 +278,7 @@ class SafetyPipeline():
         return round_list_of_lists(detox)
 
     def calc_gantman(self, image):
-        results = predict.classify_nd(self.gantman_model, np.array(image))
+        results = predict.classify_nd(self.gantman_model, np.array(image.permute(0, 2, 3, 1)))
         return round_list_of_lists([list(x.values()) for x in results])
 
     def calc_laionsafety(self, image):
@@ -290,8 +305,8 @@ class SafetyPipeline():
 
     ### Load dataset
     def load_dataset(self, dataset_urls):
-      self.ds = (wds.WebDataset(dataset_urls, handler=wds.ignore_and_continue).to_tuple("__url__", "__key__", "jpg", "jpg", "jpg", "txt").map_tuple(return_key, return_key, preprocimg224, preprocimg260, preprocopenclip224, preproctxt))
-      self.dl = DataLoader(self.ds, num_workers=self.num_workers, batch_size=self.batchsize) #, collate_fn=collate_fn) # , collate_fn=return_none_for_broken_batch) # , collate_fn=return_none_for_broken_batch) # , collate_fn=remove_none_from_batches)
+      self.ds = (wds.WebDataset(dataset_urls, handler=wds.ignore_and_continue).to_tuple("__url__", "__key__", "jpg", "jpg", "txt").map_tuple(return_key, return_key, preprocimg260, preprocopenclip224, preproctxt))
+      self.dl = DataLoader(self.ds, num_workers=self.num_workers, batch_size=self.batchsize, prefetch_factor=self.prefetch_factor) #, collate_fn=collate_fn) # , collate_fn=return_none_for_broken_batch) # , collate_fn=return_none_for_broken_batch) # , collate_fn=remove_none_from_batches)
       # self.dl = DataLoader(self.ds, num_workers=1, batch_size=None) # , collate_fn=remove_none_from_batches)
       # self.dl = wds.WebLoader(self.ds, num_workers=1, batch_size=self.batchsize)
 
@@ -356,7 +371,8 @@ class SafetyPipeline():
         try:
           for model_name, m in self.model_functions.items():
               batch_outputs[model_name] = m(batch[self.use_batch[model_name]])
-        except:
+        except Exception as e:
+          print(e)
           ## Save corrupt batch keys to skipped_keys
           skipped_keys.extend(batch[self.use_batch['key']])
           for batch_output_key in batch_outputs:
@@ -385,6 +401,8 @@ class SafetyPipeline():
         if (len(allkeys) > self.debug_runner) and (self.debug_runner > 0):
           running_time = (time() - start_time)
           print(f"Ran all models ({', '.join(self.run_these_models)}) on {len(allkeys):,} image-text-pairs in {str(timedelta(seconds=running_time))} (h:mm:ss:ms).")
+          seconds_per_image = running_time / len(allkeys)
+          print(f"Estimated time to run on 2B image-text-pairs ({', '.join(self.run_these_models)}) is {2000000000*seconds_per_image/86400:.2f} days")
           break
 
       output_df = pd.DataFrame(results)
