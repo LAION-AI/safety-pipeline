@@ -1,0 +1,2 @@
+pipe:aws s3 cp s3://s-datasets/laion5b/laion2B-data/000000.tar - - 1001 image-text-pairs - 0:05:26.891647 (h:mm:ss:ms)
+pipe:aws s3 cp s3://s-datasets/laion5b/laion2B-data/000000.tar - - 1001 image-text-pairs - 0:05:27.029214 (h:mm:ss:ms)
